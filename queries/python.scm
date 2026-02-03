@@ -20,7 +20,7 @@
 ((function_definition
    name: (identifier) @_name
    body: (block)? @test.inside) @test.around
- (#pred equal "^test_" @_name))
+ (#match "^test_" @_name))
 
 (list
   (_) @entry.around)
