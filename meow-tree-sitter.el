@@ -194,10 +194,10 @@ to use."
 
 (defun meow-tree-sitter--get-nodes-around (types beg end &optional query)
   "Return tree-sitter nodes matching TYPES around BEG and END.
-The return value is a cons cell of two lists: nodes that
-encompass the region between BEG and END, and nodes that are
-after BEG. Both lists are sorted by \"closeness\" of the node to
-the region.
+The return value is a list of three elements: nodes that
+encompass the region between BEG and END, nodes that are
+after BEG, and nodes that end before BEG. All lists are sorted by
+\"closeness\" of the node to the region.
 
 If `meow-tree-sitter-can-expand' is non-nil, filter out nodes that
 are identical to the current region.
@@ -206,11 +206,12 @@ QUERY, if non-nil, is an alist defining a custom set of queries
 to be used."
   (let* ((nodes (meow-tree-sitter--get-nodes-of-type types query))
          (nodes-around)
-         (nodes-after))
+         (nodes-after)
+         (nodes-before))
     (cl-loop for node in nodes
              if (cl-destructuring-bind (start . finish) (cdr node)
-                  (or (and (< start beg)
-                           (> finish end))
+                  (or (and (<= start beg)
+                           (>= finish end))
                       (and (not meow-tree-sitter-can-expand)
                            (= start beg)
                            (= finish end))))
@@ -218,7 +219,11 @@ to be used."
              else
              if (cl-destructuring-bind (start . finish) (cdr node)
                   (>= start beg))
-             do (push node nodes-after))
+             do (push node nodes-after)
+             else
+             if (cl-destructuring-bind (_start . finish) (cdr node)
+                  (<= finish beg))
+             do (push node nodes-before))
     ;; Since nodes are a tree, ones that start earlier must be further from the
     ;; region than ones that start later, since every node must start before the
     ;; region starts.
@@ -226,7 +231,17 @@ to be used."
                          (> (cadr a) (cadr b))))
     (sort nodes-after (lambda (a b)
                         (< (cadr a) (cadr b))))
-    (cons nodes-around nodes-after)))
+    (sort nodes-before (lambda (a b)
+                         (> (cddr a) (cddr b))))
+    (list nodes-around nodes-after nodes-before)))
+
+(defun meow-tree-sitter--inside-types-to-around (types)
+  "Return TYPES with \".inside\" replaced by \".around\" when present."
+  (mapcar (lambda (type)
+            (let* ((name (symbol-name type))
+                   (around (string-replace ".inside" ".around" name)))
+              (intern around)))
+          types))
 
 (defun meow-tree-sitter--select-thing (types &optional query)
   "Return bounds of innermost thing around region/point in TYPES.
@@ -237,12 +252,35 @@ optional alist of custom queries to use."
     (when (use-region-p)
       (setq start (region-beginning)
             end (region-end)))
-    (cl-destructuring-bind (around . after)
-        (meow-tree-sitter--get-nodes-around
-         types start end query)
+    (let* ((probe (point))
+           (selection-data (meow-tree-sitter--get-nodes-around
+                            types start end query))
+           (probe-data (meow-tree-sitter--get-nodes-around
+                        types probe probe query))
+           (around (nth 0 selection-data))
+           (probe-around (nth 0 probe-data))
+           (after (nth 1 probe-data))
+           (before (nth 2 probe-data))
+           (outer-types (meow-tree-sitter--inside-types-to-around types))
+           (outer-data (meow-tree-sitter--get-nodes-around
+                        outer-types probe probe query))
+           (outer-around (nth 0 outer-data))
+           (outer-bounds (cdar outer-around))
+           (at-outer-start (and outer-bounds (= (car outer-bounds) probe)))
+           (at-outer-end (and outer-bounds (= (cdr outer-bounds) probe)))
+           (inner-bounds (cdar probe-around))
+           (at-inner-start (and inner-bounds (= (car inner-bounds) probe)))
+           (at-inner-end (and inner-bounds (= (cdr inner-bounds) probe)))
+           (bounds (cdar around))
+           (begin-cmd (eq this-command 'meow-beginning-of-thing))
+           (end-cmd (eq this-command 'meow-end-of-thing)))
       (cond
+       ((and begin-cmd (or at-outer-start at-inner-start) before)
+        (cdar before))
+       ((and end-cmd (or at-outer-end at-inner-end) after)
+        (cdar after))
        (around
-        (cdar around))
+        bounds)
        ((and (integerp meow-tree-sitter-can-jump-forward)
              (< (- (cadar after) (point))
                 meow-tree-sitter-can-jump-forward))
